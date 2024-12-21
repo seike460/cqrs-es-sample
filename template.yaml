@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CQRS + ES Demo with Separate Summary and Detail Tables
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+
+Resources:
+  # 1) EventsTable (イベントストア)
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "EventsTable"
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: AggregateID
+          AttributeType: S
+        - AttributeName: Sequence
+          AttributeType: S
+      KeySchema:
+        - AttributeName: AggregateID
+          KeyType: HASH
+        - AttributeName: Sequence
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # 2) UserSummaryTable (一覧表示用)
+  UserSummaryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "UserSummaryTable"
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: UserID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserID
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # 3) UserDetailTable (詳細表示用)
+  UserDetailTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "UserDetailTable"
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: UserID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: UserID
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # 4) CommandLambda (POST /command)
+  CommandLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: CommandLambda
+      Handler: command_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt EventsTable.Arn
+      Events:
+        CommandApiEvent:
+          Type: Api
+          Properties:
+            Path: /command
+            Method: POST
+
+  # 5) ProjectionLambda
+  ProjectionLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ProjectionLambda
+      Handler: projection_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt UserSummaryTable.Arn
+                - !GetAtt UserDetailTable.Arn
+      Events:
+        DynamoDBStreamEvent:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt EventsTable.StreamArn
+            StartingPosition: LATEST
+
+  # 6) ListLambda (GET /list)
+  ListLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ListLambda
+      Handler: list_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+              Resource: !GetAtt UserSummaryTable.Arn
+      Events:
+        ListApiEvent:
+          Type: Api
+          Properties:
+            Path: /list
+            Method: GET
+
+  # 7) DetailLambda (GET /detail?user_id=xxx)
+  DetailLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: DetailLambda
+      Handler: detail_handler.lambda_handler
+      CodeUri: src/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt UserDetailTable.Arn
+      Events:
+        DetailApiEvent:
+          Type: Api
+          Properties:
+            Path: /detail
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+    Description: "Base URL for the APIs"
